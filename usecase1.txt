@@ -1,0 +1,58 @@
+spark-shell --packages com.databricks:spark-csv_2.10:1.5.0 --num-executors 3 --executor-memory 1024m --executor-cores 2
+
+val input_loans = sqlContext.read.format("com.databricks.spark.csv").option("header","true").option("inferSchema","true").load("kiva_analytics/data/loans.csv").
+drop("original_language").drop("description_translated")
+
+val input_loans_lenders = sqlContext.read.format("com.databricks.spark.csv").option("header","true").option("inferSchema","true").load("kiva_analytics/data/loans_lenders.csv").map(rec=>(rec(0).toString.toLong,rec(1).toString,rec(1).toString.split(',').size)).toDF("loan_id","lender_list","lenders_count")
+
+val input_lenders = sqlContext.read.format("com.databricks.spark.csv").option("header","true").option("inferSchema","true").load("kiva_analytics/data/lenders.csv")
+
+val input_country_stats = sqlContext.read.format("com.databricks.spark.csv").option("header","true").option("inferSchema","true").load("kiva_analytics/data/country_stats.csv")
+
+
+------------------------------------------------------------------------------------------------------
+input_loans: org.apache.spark.sql.DataFrame = [loan_id: int, loan_name: string, description: string, funded_amount: double, loan_amount: double, status: string, activity_name: string, sector_name: string, loan_use: string, country_code: string, country_name: string, town_name: string, currency_policy: string, currency_exchange_coverage_rate: double, currency: string, partner_id: double, posted_time: string, planned_expiration_time: string, disburse_time: string, raised_time: string, lender_term: double, num_lenders_total: int, num_journal_entries: int, num_bulk_entries: int, tags: string, borrower_genders: string, borrower_pictured: string, repayment_interval: string, distribution_model: string]
+------------------------------------------------------------------------------------------------------
+=>Country wise top loans
+outputs
+
+sqlContext.setConf("spark.sql.shuffle.partitions","18")
+
+1.Country,Sector,total_loan_amount  desc by total
+val op1 = input_loans.groupBy("country_name","sector_name").agg(sum("loan_amount").alias("total_loan_amount")).orderBy(col("country_name"),col("total_loan_amount").desc)
+
+2.Country,State,total_loan_amount desc by total
+val op2 = input_loans.groupBy("country_name","town_name").agg(sum("loan_amount").alias("total_loan_amount")).orderBy(col("country_name"),col("total_loan_amount").desc)
+
+=>prepare the list of col "use" for all sector
+output
+1.Sector,list of all loan_uses
+
+val op3 = input_loans.select("sector_name","loan_use").map(rec=>(rec(0).toString,rec(1).toString))
+
+val op3 = input_loans.select("sector_name","loan_use").map(rec=>(rec(0).toString,rec(1).toString)).groupByKey().map(rec=>(rec._1,rec._2.map(r=>r.replaceAll("\\.|,|(t|T)o|buy|(re)sell|purchase|make|and|etc"," ")).mkString(" ")))
+
+
+=>Total amount distributed everyday
+output:
+date,total_amount
+
+val op4 = input_loans.groupBy("")
+
+=>top 10 months with heighest loan distribution
+val op4 = input_loans.filter("planned_expiration_time!=''").groupBy(month(to_date(col("planned_expiration_time"))).alias("loan_month")).agg(sum(col("loan_amount")).alias("total_amount")).orderBy(col("total_amount").desc).limit(3)
+
+=>find the sector, which has heighest irregular repayment_interval 
+val op5 = input_loans.filter("repayment_interval=irregular").groupBy(col("sector_name")).agg(count(1).alias("total_rep_int")).orderBy(col("total_rep_int"))
+
+=>How much time taken to get funded after posting(posted_interval) and time taken to get posted after disburusing(disbursed_interval) for each loan_id
+
+disbursed_time = time at which loan is disbursed by agent to borrower
+posted_time = time at which loan is posted on kiva by agent
+funded_time = time at which loan amount posted to kiva funded by lenders completely
+
+val op6 = input_loans.filter("planned_expiration_time!='' AND posted_time!='' AND disburse_time!=''").
+select(col("loan_id"),
+datediff(to_date(col("planned_expiration_time")),to_date(col("posted_time"))).alias("posted_interval"),
+datediff(to_date(col("posted_time")),to_date(col("disburse_time"))).alias("disbursed_interval")
+).orderBy(col("disbursed_interval").desc)
