@@ -1,0 +1,173 @@
+spark-shell --packages com.databricks:spark-csv_2.10:1.5.0 --num-executors 3 --executor-memory 1024m --executor-cores 2
+
+val offers_input = sqlContext.read.format("com.databricks.spark.csv").option("header","true").option("inferSchema","true").load("retail_analytics/data/offers.csv")
+offers_input: org.apache.spark.sql.DataFrame = [offer: int, category: int, quantity: int, company: int, offervalue: double, brand: int]
+
+val train_history_input = sqlContext.read.format("com.databricks.spark.csv").option("header","true").option("inferSchema","true").load("retail_analytics/data/trainHistory.csv")
+train_history_input: org.apache.spark.sql.DataFrame = [id: bigint, chain: int, offer: int, market: int, repeattrips: int, repeater: string, offerdate: string]
+
+1)number of visitis by cutormers to certain storage chain
+
+val num_visit_chains_cust = train_history_input.groupBy("chain","id").agg(sum(col("repeattrips")).alias("total_visits")).orderBy(col("total_visits").desc)
+Analysis : find every store with customers with heighest visits 
+
+2)total visits in every store chain
+
+val num_visit_chains = train_history_input.groupBy("chain").agg(sum(col("repeattrips")).alias("total_visits")).orderBy(col("total_visits").desc)
+Analysis : find out most busy storage chains.
+
+3)find customers whose repeater visit is false and get offers
+
+val offers_zero_visit = train_history_input.filter("repeater='f'").groupBy("offer").agg(count("id").alias("offers_zero_visit")).orderBy(col("offers_zero_visit").desc)
+
+val offers_t_f = train_history_input.groupBy("offer").agg(count("offer").alias("num_offers")).orderBy(col("num_offers").desc)
+//zero repeaters are more in offers table
+
+4)category with heighest offervalue
+
+val heighest_val_off_cat = offers_input.groupBy("category").agg(sum(col("offervalue")).alias("offer_val_cate")).orderBy(col("offer_val_cate").desc
+
+5) company with heighest offer value
+
+val heighest_val_off_company = offers_input.groupBy("company").agg(sum(col("offervalue")).alias("heighest_val_off_company")).orderBy(col("heighest_val_off_company").desc)
+
+6) Offered value each month for all types of repeaters
+ 
+val offer_val_month_rep = train_history_input.join(offers_input,train_history_input("offer")===offers_input("offer")).
+groupBy(month(col("offerdate")).alias("month_formatted"),col("repeater")).
+agg(sum(col("offervalue")).alias("total_off_value")).
+orderBy(col("month_formatted"),col("repeater"),col("total_off_value"))
+
+analysis: every month number of people repeated the trips after offers are less than the people who have 0 repeate trips even after offers.
+try to target other group of people
+
+===============================
+Customer Analysis
+===============================
+val input_tran = sqlContext.read.parquet("retail_analysis/data/parquet/tran_aa")
+
+Find out why only 5155  customers use these products?
+val tran_least_cust_count = 
+input_tran_season.
+where(col("dept").isin(always_least_dept:_*)).
+groupBy("id").agg(sum(col("purchasequantity"))).count
+
+=>Find out what is the brand of the lease sold products?
+=>What other products are being sold with least sold products?
+
+[id: int, chain: int, dept: int, category: int, company: bigint, brand: int, date: string, productsize: double, productmeasure: string, purchasequantity: int, purchaseamount: double, season: string]
+
+val other_prod_bought = input_tran_season.join(tran_least_cust,tran_least_cust("id")===input_tran_season("id")).select(input_tran_season.col("*"))
+
+val all_prod_a_day =
+other_prod_bought.
+select("id","date","dept").
+map(rec=>((rec(0).toString.toInt,rec(1).toString),rec(2).toString.toInt)).
+groupByKey().
+map(rec=>(rec._1._1,rec._1._2,rec._2.toList.distinct.sorted)).
+toDF("id","date","prod_group").
+orderBy("id","date")
+
+val all_prod_a_day =
+other_prod_bought.
+select("id","date","dept").
+map(rec=>((rec(0).toString.toInt,rec(1).toString),rec(2).toString.toInt)).
+groupByKey().
+map(rec=>(rec._1._1,rec._1._2,rec._2.toList.distinct.sorted)).map(rec=>rec._1+"|"+rec._2+"|"+rec._3).
+sortBy(rec=>(rec.split('|')(0).toInt,rec.split('|')(1).toString))
+
+all_prod_a_day.coalesce(1).saveAsTextFile("retail_output/buying_habbits.txt")
+
+
+
+4)How often does customer buy the product
+
+val how_often = input_tran_season.
+where(col("dept").isin(always_least_dept:_*)).
+withColumn("lead",lead("date",1) over (Window.partitionBy("id","dept").orderBy("date"))).
+withColumn("days",when(datediff(col("lead"),col("date")).isNull,9999999).otherwise(datediff(col("lead"),col("date")))
+)
+
+5)filter products which are bought very frequently( days_diff < 21)
+
+how_often.filter("days < 21").orderBy("id","dept","days")
+
+6)
+other_prod_bought.orderBy("id","date")
+
+===============================
+Product Analysis
+===============================
+
+1)Top most/least category sold in each season
+
+Spring => 1st March to 31st May
+Summer => 1st June to 31st Aug
+Autum => 1st Sept to 30th Nov
+Winter => Dec 1 to 28th Feb
+
+
+val input_tran_season = input_tran.withColumn("season",
+when((month(col("date")) === 12) || (month(col("date")) > 0) && (month(col("date")) < 3),"winter").otherwise(
+when((month(col("date")) >=3) && (month(col("date")) <6),"spring").otherwise(
+when((month(col("date")) >=6) && (month(col("date")) <9),"summer").otherwise("fall")
+)))
+
+//Top most sold 10 dept in every season
+val top_dept = input_tran_season.groupBy("season","dept").agg(round(sum(col("purchaseamount")),2).alias("top_10_dept"),count(col("purchasequantity")).alias("quantity"))
+
+import org.apache.spark.sql.expressions._
+val top_most_dept = top_dept.withColumn("rank",rank().over(Window.partitionBy(col("season")).orderBy(col("quantity").desc))).filter("rank < 11")
+
+//Top least sold dept in every season
+val top_least_dept = top_dept.withColumn("rank",rank().over(Window.partitionBy(col("season")).orderBy(col("quantity")))).filter("rank < 11")
+
+
+//product always in most top 5 in all season
+val always_most_dept = top_most_dept.
+filter("rank < 6").groupBy("dept","rank").agg(count(col("rank")).alias("always_most")).filter("always_most=4").select("dept").collect.map(rec=>rec(0).toString.toInt)
+
++----+----+-----------+                                                         
+|dept|rank|always_most|
++----+----+-----------+
+|  63|   2|          4|
+|   9|   1|          4|
+|  33|   5|          4|
++----+----+-----------+
+
+//product always in least top 5 in all season
+val always_least_dept = top_least_dept.
+filter("rank < 6").groupBy("dept","rank").agg(count(col("rank")).alias("always_least")).filter("always_least=4").select("dept").collect.map(rec=>rec(0).toString.toInt)
+
++----+----+------------+                                                        
+|dept|rank|always_least|
++----+----+------------+
+|  98|   1|           4|
+|  78|   2|           4|
++----+----+------------+
+
+//Least sold product analysis
+val tran_least_cust = 
+input_tran_season.
+where(col("dept").isin(always_least_dept:_*)).select(col("id")).distinct
+
+//find the category,brand,company of Least sold products to track the competitors
+val competitors = input_tran.filter("dept = 98 OR dept = 78").select("dept","category","brand","company").distinct.orderBy("dept")
+
+
+//list of all dept,category,brand and company
+val product_info = input_tran.select("dept","category","company","brand").orderBy("dept","category","company","brand").distinct
+
+//fetch other categories and list other dept for the same
+val other_prods = input_tran.where(col("category").isin(competitors.select("category").distinct.collect.map(rec=>rec(0).toString.toInt):_*))
+--this category has no other departments
+
+Total brnads = product_info.select("brand").distinct.count = 17055
+Total Comapnies = product_info.select("company").distinct.count = 15730
+Total Categories = product_info.select("category").distinct.count = 821
+Total Depts = product_info.select("dept").distinct.count = 82
+
+1.5 billion customer tran
+
+Find Top(most/least) customers for every Brnads
+Find Top(most/least) customers for every Company
